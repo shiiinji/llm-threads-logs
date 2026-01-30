@@ -22,6 +22,7 @@ install: release
 	mkdir -p "$(BIN_DIR)"
 	cp target/release/claude_session_to_obsidian "$(BIN_DIR)/"
 	cp target/release/codex_notify_to_obsidian "$(BIN_DIR)/"
+	cp target/release/review_session "$(BIN_DIR)/"
 
 uninstall:
-	rm -f "$(BIN_DIR)/claude_session_to_obsidian" "$(BIN_DIR)/codex_notify_to_obsidian"
+	rm -f "$(BIN_DIR)/claude_session_to_obsidian" "$(BIN_DIR)/codex_notify_to_obsidian" "$(BIN_DIR)/review_session"

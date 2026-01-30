@@ -43,12 +43,22 @@ export OBSIDIAN_AI_ROOT="llms"
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "review_session"
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
-> **Note**: `Stop` hook は各ターン完了時に発火します。セッション終了時のみにしたい場合は `Stop` を `SessionEnd` に変更してください。
+> **Note**: `Stop` hook は各ターン完了時に発火します。`SessionEnd` hook はセッション終了時に発火し、会話内容をレビューして新しい Skill を提案します。
 
 ### 3. Codex CLI の notify 設定
 
@@ -113,5 +123,15 @@ make obsidian-dirs
 
 ## 生成されるバイナリ
 
-- `claude_session_to_obsidian` — Claude Code の SessionEnd hook: stdin JSON → Markdown 生成
+- `claude_session_to_obsidian` — Claude Code の Stop hook: stdin JSON → Markdown 生成
 - `codex_notify_to_obsidian` — Codex CLI notify: argv[1] JSON → Markdown 追記
+- `review_session` — Claude Code の SessionEnd hook: 会話内容をレビューし Skill 提案を生成
+
+## Skill 提案機能
+
+`review_session` はセッション終了時に自動実行され、以下を行います：
+
+1. 作成された MD ファイルから User の指示を抽出
+2. `codex exec -c 'notify=[]'` で LLM にレビューさせる
+3. 再利用可能な Skill パターンを提案
+4. 提案を `$OBSIDIAN_VAULT/$OBSIDIAN_AI_ROOT/skill_proposals/` に保存

@@ -9,11 +9,10 @@ use std::{
     process::Command,
 };
 
-const BEGIN: &str = "<!-- BEGIN AUTO TURNS -->";
-const END: &str = "<!-- END AUTO TURNS -->";
+pub const BEGIN: &str = "<!-- BEGIN AUTO TURNS -->";
+pub const END: &str = "<!-- END AUTO TURNS -->";
 
 fn main() -> Result<()> {
-    // Codex passes a single JSON notification payload in argv[1].
     let payload = env::args().nth(1);
     let payload = match payload {
         Some(p) if !p.trim().is_empty() => p,
@@ -61,7 +60,6 @@ fn main() -> Result<()> {
 
     let project = safe_name(&git_project_name(cwd));
 
-    // Paths
     let vault_path = PathBuf::from(&vault);
     let base_dir = vault_path.join(&ai_root).join("Codex").join(&project);
     let md_dir = base_dir.join("Threads");
@@ -69,7 +67,6 @@ fn main() -> Result<()> {
     fs::create_dir_all(&md_dir).context("failed to create md_dir")?;
     fs::create_dir_all(&raw_dir).context("failed to create raw_dir")?;
 
-    // Raw notify log (jsonl)
     let raw_path = raw_dir.join(format!("{thread_id}.jsonl"));
     {
         let mut f = OpenOptions::new()
@@ -84,7 +81,6 @@ fn main() -> Result<()> {
         )?;
     }
 
-    // Markdown note: {date}_{title}_{thread_id}.md
     let first_user_msg = extract_first_user_msg(&input_messages);
     let md_path = find_or_create_md_path(&md_dir, thread_id, first_user_msg.as_deref());
     let mut text = if md_path.exists() {
@@ -95,7 +91,6 @@ fn main() -> Result<()> {
 
     text = ensure_turns_block(&text);
 
-    // Dedupe by turn-id (avoid double writes)
     if !turn_id.is_empty() {
         let sentinel = format!("<!-- turn-id:{turn_id} -->");
         if text.contains(&sentinel) {
@@ -104,7 +99,6 @@ fn main() -> Result<()> {
         let block = build_turn_block(turn_id, &input_messages, last_assistant, &sentinel);
         text = insert_before_end(&text, &block);
     } else {
-        // No turn-id: still append, but without strict dedupe
         let sentinel = "<!-- turn-id:(missing) -->".to_string();
         let block = build_turn_block("(no turn-id)", &input_messages, last_assistant, &sentinel);
         text = insert_before_end(&text, &block);
@@ -114,7 +108,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_codex_note_skeleton(project: &str, thread_id: &str, cwd: &str) -> String {
+pub fn build_codex_note_skeleton(project: &str, thread_id: &str, cwd: &str) -> String {
     let created = Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
     let project_q = yaml_quote(project);
@@ -138,15 +132,15 @@ tags:
     )
 }
 
-fn ensure_turns_block(s: &str) -> String {
+pub fn ensure_turns_block(s: &str) -> String {
     if s.contains(BEGIN) && s.contains(END) {
         return s.to_string();
     }
     format!("{}\n\n{}\n## Turns (auto)\n{}\n", s.trim_end(), BEGIN, END)
 }
 
-fn build_turn_block(
-    turn_id: &str,
+pub fn build_turn_block(
+    _turn_id: &str,
     input_messages: &Value,
     last_assistant: &str,
     sentinel: &str,
@@ -195,7 +189,7 @@ fn build_turn_block(
     )
 }
 
-fn insert_before_end(s: &str, block: &str) -> String {
+pub fn insert_before_end(s: &str, block: &str) -> String {
     if let Some(pos) = s.find(END) {
         let (pre, post) = s.split_at(pos);
         format!(
@@ -237,7 +231,7 @@ fn git_project_name(cwd: &str) -> String {
         .to_string()
 }
 
-fn safe_name(s: &str) -> String {
+pub fn safe_name(s: &str) -> String {
     let mut tmp = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -253,12 +247,11 @@ fn safe_name(s: &str) -> String {
     }
 }
 
-fn yaml_quote(s: &str) -> String {
+pub fn yaml_quote(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn find_or_create_md_path(md_dir: &Path, thread_id: &str, first_user_msg: Option<&str>) -> PathBuf {
-    // Search for existing file containing thread_id
     if let Ok(entries) = fs::read_dir(md_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -270,14 +263,13 @@ fn find_or_create_md_path(md_dir: &Path, thread_id: &str, first_user_msg: Option
         }
     }
 
-    // Create new filename: {date}_{title}_{thread_id}.md
     let date = Local::now().format("%Y-%m-%d").to_string();
     let title = generate_title(first_user_msg);
     let filename = format!("{date}_{title}_{thread_id}.md");
     md_dir.join(filename)
 }
 
-fn extract_first_user_msg(input_messages: &Value) -> Option<String> {
+pub fn extract_first_user_msg(input_messages: &Value) -> Option<String> {
     match input_messages {
         Value::Array(arr) => arr.first().and_then(|v| v.as_str()).map(|s| s.to_string()),
         Value::String(s) => Some(s.clone()),
@@ -291,12 +283,10 @@ fn generate_title(text: Option<&str>) -> String {
         _ => return "untitled".to_string(),
     };
 
-    // Try LLM-based title generation
     if let Some(title) = generate_title_with_llm(text) {
         return title;
     }
 
-    // Fallback
     fallback_title(text)
 }
 
@@ -310,12 +300,7 @@ fn generate_title_with_llm(text: &str) -> Option<String> {
     let tmp_file = tmp_dir.join(format!("title_{}.txt", std::process::id()));
 
     let status = Command::new("codex")
-        .args([
-            "exec",
-            "-c", "notify=[]",
-            "-o", tmp_file.to_str()?,
-            &prompt,
-        ])
+        .args(["exec", "-c", "notify=[]", "-o", tmp_file.to_str()?, &prompt])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -337,7 +322,7 @@ fn generate_title_with_llm(text: &str) -> Option<String> {
     Some(title)
 }
 
-fn sanitize_title(s: &str) -> String {
+pub fn sanitize_title(s: &str) -> String {
     let title: String = s
         .trim()
         .chars()
@@ -367,6 +352,10 @@ fn sanitize_title(s: &str) -> String {
     result.trim_matches('-').to_string()
 }
 
-fn fallback_title(text: &str) -> String {
+pub fn fallback_title(text: &str) -> String {
     sanitize_title(&text.chars().take(40).collect::<String>())
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
