@@ -1,3 +1,4 @@
+use ai_log_exporter::{generate_title, git_project_name, safe_id, safe_name, with_lock_file, yaml_quote};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, SecondsFormat};
 use serde_json::Value;
@@ -5,7 +6,6 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::Command,
 };
 
 pub const BEGIN: &str = "<!-- BEGIN AUTO TRANSCRIPT -->";
@@ -37,6 +37,7 @@ fn main() -> Result<()> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown-session")
         .to_string();
+    let session_id_safe = safe_id(&session_id, "unknown-session");
 
     let transcript_path = payload
         .get("transcript_path")
@@ -57,32 +58,36 @@ fn main() -> Result<()> {
     fs::create_dir_all(&md_dir).context("failed to create md_dir")?;
     fs::create_dir_all(&raw_dir).context("failed to create raw_dir")?;
 
-    let raw_copy = raw_dir.join(format!("{session_id}.jsonl"));
-    let _ = fs::copy(transcript_path, &raw_copy);
+    let lock_path = md_dir.join(format!(".lock_{session_id_safe}"));
+    with_lock_file(&lock_path, || {
+        let raw_copy = raw_dir.join(format!("{session_id_safe}.jsonl"));
+        let _ = fs::copy(transcript_path, &raw_copy);
 
-    let msgs = parse_claude_jsonl(transcript_path).context("failed to parse transcript JSONL")?;
-    let started_at = msgs.iter().find_map(|m| m.ts);
-    let first_user_msg = msgs.iter().find(|m| m.role == "user").map(|m| m.text.as_str());
+        let msgs = parse_claude_jsonl(transcript_path).context("failed to parse transcript JSONL")?;
+        let started_at = msgs.iter().find_map(|m| m.ts);
+        let first_user_msg = msgs.iter().find(|m| m.role == "user").map(|m| m.text.as_str());
 
-    let md_path = find_or_create_md_path(&md_dir, &session_id, first_user_msg, started_at);
+        let md_path = find_or_create_md_path(&md_dir, &session_id_safe, first_user_msg, started_at);
 
-    let existing = if md_path.exists() {
-        fs::read_to_string(&md_path).context("failed to read existing md note")?
-    } else {
-        build_claude_note_skeleton(&project, &session_id, cwd, started_at)
-    };
+        let existing = if md_path.exists() {
+            fs::read_to_string(&md_path).context("failed to read existing md note")?
+        } else {
+            build_claude_note_skeleton(&project, &session_id, cwd, started_at)
+        };
 
-    let exported = Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-    let source_rel = raw_copy
-        .strip_prefix(&vault_path)
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| raw_copy.display().to_string());
+        let exported = Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let source_rel = raw_copy
+            .strip_prefix(&vault_path)
+            .ok()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| raw_copy.display().to_string());
 
-    let new_block = build_transcript_block(&exported, &source_rel, &msgs);
-    let updated = upsert_block(&existing, &new_block);
+        let new_block = build_transcript_block(&exported, &source_rel, &msgs);
+        let updated = upsert_block(&existing, &new_block);
 
-    fs::write(&md_path, updated).context("failed to write md note")?;
+        fs::write(&md_path, updated).context("failed to write md note")?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -237,54 +242,6 @@ fn parse_rfc3339_local(s: &str) -> Option<DateTime<Local>> {
         .map(|dt| dt.with_timezone(&Local))
 }
 
-fn git_project_name(cwd: &str) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .output();
-
-    if let Ok(out) = out {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                let p = Path::new(s.trim());
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if !name.trim().is_empty() {
-                        return name.to_string();
-                    }
-                }
-            }
-        }
-    }
-
-    Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown-project")
-        .to_string()
-}
-
-pub fn safe_name(s: &str) -> String {
-    let mut tmp = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '/' | '\\' | ':' | '\n' | '\r' | '\t' => tmp.push('_'),
-            _ => tmp.push(c),
-        }
-    }
-    let collapsed = tmp.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > 120 {
-        collapsed.chars().take(120).collect()
-    } else {
-        collapsed
-    }
-}
-
-pub fn yaml_quote(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 fn find_or_create_md_path(
     md_dir: &Path,
     session_id: &str,
@@ -309,85 +266,6 @@ fn find_or_create_md_path(
     let title = generate_title(first_user_msg);
     let filename = format!("{date}_{title}_{session_id}.md");
     md_dir.join(filename)
-}
-
-fn generate_title(text: Option<&str>) -> String {
-    let text = match text {
-        Some(t) if !t.trim().is_empty() => t,
-        _ => return "untitled".to_string(),
-    };
-
-    if let Some(title) = generate_title_with_llm(text) {
-        return title;
-    }
-
-    fallback_title(text)
-}
-
-fn generate_title_with_llm(text: &str) -> Option<String> {
-    let prompt = format!(
-        "Generate a short filename-safe title (English, max 20 chars, lowercase, hyphens only, no spaces) for this conversation. Output ONLY the title, nothing else:\n\n{}",
-        text.chars().take(500).collect::<String>()
-    );
-
-    let tmp_dir = std::env::temp_dir();
-    let tmp_file = tmp_dir.join(format!("title_{}.txt", std::process::id()));
-
-    let status = Command::new("codex")
-        .args(["exec", "-c", "notify=[]", "-o", tmp_file.to_str()?, &prompt])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?;
-
-    if !status.success() {
-        let _ = fs::remove_file(&tmp_file);
-        return None;
-    }
-
-    let title = fs::read_to_string(&tmp_file).ok()?;
-    let _ = fs::remove_file(&tmp_file);
-    let title = sanitize_title(&title);
-
-    if title.is_empty() || title.len() > 50 {
-        return None;
-    }
-
-    Some(title)
-}
-
-pub fn sanitize_title(s: &str) -> String {
-    let title: String = s
-        .trim()
-        .chars()
-        .take(30)
-        .map(|c| match c {
-            'a'..='z' | '0'..='9' | '-' => c,
-            'A'..='Z' => c.to_ascii_lowercase(),
-            ' ' | '_' => '-',
-            _ => '-',
-        })
-        .collect();
-
-    let mut result = String::new();
-    let mut prev_hyphen = false;
-    for c in title.chars() {
-        if c == '-' {
-            if !prev_hyphen && !result.is_empty() {
-                result.push('-');
-            }
-            prev_hyphen = true;
-        } else {
-            result.push(c);
-            prev_hyphen = false;
-        }
-    }
-
-    result.trim_matches('-').to_string()
-}
-
-pub fn fallback_title(text: &str) -> String {
-    sanitize_title(&text.chars().take(40).collect::<String>())
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+use ai_log_exporter::{git_project_name, safe_id, safe_name, with_lock_file};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
@@ -26,6 +27,7 @@ fn main() -> Result<()> {
         .get("session_id")
         .and_then(|v| v.as_str())
         .context("missing session_id in hook payload")?;
+    let session_id_safe = safe_id(session_id, "unknown-session");
 
     let cwd = payload.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -42,16 +44,23 @@ fn main() -> Result<()> {
         .join(&project)
         .join("Threads");
 
-    let md_path = find_md_by_session_id(&md_dir, session_id);
-    let md_path = match md_path {
-        Some(p) => p,
-        None => {
-            eprintln!("MD file not found for session: {}", session_id);
-            return Ok(());
-        }
+    let lock_path = md_dir.join(format!(".lock_{session_id_safe}"));
+    let md_content = with_lock_file(&lock_path, || {
+        let md_path = find_md_by_session_id(&md_dir, &session_id_safe);
+        let md_path = match md_path {
+            Some(p) => p,
+            None => {
+                eprintln!("MD file not found for session: {}", session_id);
+                return Ok(None);
+            }
+        };
+        let md_content = fs::read_to_string(&md_path).context("failed to read MD file")?;
+        Ok(Some((md_path, md_content)))
+    })?;
+    let (md_path, md_content) = match md_content {
+        Some(v) => v,
+        None => return Ok(()),
     };
-
-    let md_content = fs::read_to_string(&md_path).context("failed to read MD file")?;
 
     // Extract user messages from MD content
     let user_messages = extract_user_messages(&md_content);
@@ -72,7 +81,7 @@ fn main() -> Result<()> {
     let proposals_dir = vault_path.join(&ai_root).join("skill_proposals");
     fs::create_dir_all(&proposals_dir).context("failed to create proposals dir")?;
 
-    let proposal_file = proposals_dir.join(format!("{}.md", session_id));
+    let proposal_file = proposals_dir.join(format!("{session_id_safe}.md"));
     let proposal_content = format!(
         r#"---
 session_id: "{}"
@@ -173,17 +182,23 @@ fn review_with_llm(user_messages: &[String], project: &str) -> Result<Option<Str
     let tmp_dir = std::env::temp_dir();
     let tmp_file = tmp_dir.join(format!("review_{}.txt", std::process::id()));
 
-    let status = Command::new("codex")
-        .args([
-            "exec",
-            "-c", "notify=[]",
-            "-o", tmp_file.to_str().unwrap(),
-            &prompt,
-        ])
+    let tmp_file_str = match tmp_file.to_str() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    let status = match Command::new("codex")
+        .args(["exec", "-c", "notify=[]", "-o", tmp_file_str, &prompt])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .context("failed to run codex exec")?;
+    {
+        Ok(s) => s,
+        Err(_) => {
+            let _ = fs::remove_file(&tmp_file);
+            return Ok(None);
+        }
+    };
 
     if !status.success() {
         let _ = fs::remove_file(&tmp_file);
@@ -200,50 +215,6 @@ fn review_with_llm(user_messages: &[String], project: &str) -> Result<Option<Str
     }
 
     Ok(Some(result))
-}
-
-fn git_project_name(cwd: &str) -> String {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .arg("rev-parse")
-        .arg("--show-toplevel")
-        .output();
-
-    if let Ok(out) = out {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                let p = std::path::Path::new(s.trim());
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    if !name.trim().is_empty() {
-                        return name.to_string();
-                    }
-                }
-            }
-        }
-    }
-
-    std::path::Path::new(cwd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown-project")
-        .to_string()
-}
-
-pub fn safe_name(s: &str) -> String {
-    let mut tmp = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '/' | '\\' | ':' | '\n' | '\r' | '\t' => tmp.push('_'),
-            _ => tmp.push(c),
-        }
-    }
-    let collapsed = tmp.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > 120 {
-        collapsed.chars().take(120).collect()
-    } else {
-        collapsed
-    }
 }
 
 #[cfg(test)]
