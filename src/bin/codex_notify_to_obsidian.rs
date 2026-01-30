@@ -84,8 +84,9 @@ fn main() -> Result<()> {
         )?;
     }
 
-    // Markdown note
-    let md_path = md_dir.join(format!("{thread_id}.md"));
+    // Markdown note: {date}_{title}_{thread_id}.md
+    let first_user_msg = extract_first_user_msg(&input_messages);
+    let md_path = find_or_create_md_path(&md_dir, thread_id, first_user_msg.as_deref());
     let mut text = if md_path.exists() {
         fs::read_to_string(&md_path).context("failed to read existing md")?
     } else {
@@ -132,8 +133,6 @@ tags:
   - codex
   - {project_q}
 ---
-
-# Codex thread — {project}
 
 "#
     )
@@ -256,4 +255,118 @@ fn safe_name(s: &str) -> String {
 
 fn yaml_quote(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn find_or_create_md_path(md_dir: &Path, thread_id: &str, first_user_msg: Option<&str>) -> PathBuf {
+    // Search for existing file containing thread_id
+    if let Ok(entries) = fs::read_dir(md_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str() {
+                if name_str.contains(thread_id) && name_str.ends_with(".md") {
+                    return entry.path();
+                }
+            }
+        }
+    }
+
+    // Create new filename: {date}_{title}_{thread_id}.md
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let title = generate_title(first_user_msg);
+    let filename = format!("{date}_{title}_{thread_id}.md");
+    md_dir.join(filename)
+}
+
+fn extract_first_user_msg(input_messages: &Value) -> Option<String> {
+    match input_messages {
+        Value::Array(arr) => arr.first().and_then(|v| v.as_str()).map(|s| s.to_string()),
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn generate_title(text: Option<&str>) -> String {
+    let text = match text {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => return "untitled".to_string(),
+    };
+
+    // Try LLM-based title generation
+    if let Some(title) = generate_title_with_llm(text) {
+        return title;
+    }
+
+    // Fallback
+    fallback_title(text)
+}
+
+fn generate_title_with_llm(text: &str) -> Option<String> {
+    let prompt = format!(
+        "Generate a short filename-safe title (English, max 20 chars, lowercase, hyphens only, no spaces) for this conversation. Output ONLY the title, nothing else:\n\n{}",
+        text.chars().take(500).collect::<String>()
+    );
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_file = tmp_dir.join(format!("title_{}.txt", std::process::id()));
+
+    let status = Command::new("codex")
+        .args([
+            "exec",
+            "-c", "notify=[]",
+            "-o", tmp_file.to_str()?,
+            &prompt,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+
+    if !status.success() {
+        let _ = fs::remove_file(&tmp_file);
+        return None;
+    }
+
+    let title = fs::read_to_string(&tmp_file).ok()?;
+    let _ = fs::remove_file(&tmp_file);
+    let title = sanitize_title(&title);
+
+    if title.is_empty() || title.len() > 50 {
+        return None;
+    }
+
+    Some(title)
+}
+
+fn sanitize_title(s: &str) -> String {
+    let title: String = s
+        .trim()
+        .chars()
+        .take(30)
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' | '-' => c,
+            'A'..='Z' => c.to_ascii_lowercase(),
+            ' ' | '_' => '-',
+            _ => '-',
+        })
+        .collect();
+
+    let mut result = String::new();
+    let mut prev_hyphen = false;
+    for c in title.chars() {
+        if c == '-' {
+            if !prev_hyphen && !result.is_empty() {
+                result.push('-');
+            }
+            prev_hyphen = true;
+        } else {
+            result.push(c);
+            prev_hyphen = false;
+        }
+    }
+
+    result.trim_matches('-').to_string()
+}
+
+fn fallback_title(text: &str) -> String {
+    sanitize_title(&text.chars().take(40).collect::<String>())
 }
