@@ -2,6 +2,34 @@ use ai_log_exporter::{sanitize_title, safe_name, yaml_quote};
 use super::*;
 
 // ========================================
+// should_process_notification tests
+// ========================================
+
+#[test]
+fn test_should_process_notification_accepts_agent_turn_complete() {
+    let v = serde_json::json!({"type":"agent-turn-complete"});
+    assert!(should_process_notification(&v));
+}
+
+#[test]
+fn test_should_process_notification_accepts_turn_complete_variants() {
+    let v = serde_json::json!({"type":"turn-complete"});
+    assert!(should_process_notification(&v));
+
+    let v = serde_json::json!({"type":"assistant-turn-complete"});
+    assert!(should_process_notification(&v));
+
+    let v = serde_json::json!({"type":"agent_turn_complete"});
+    assert!(should_process_notification(&v));
+}
+
+#[test]
+fn test_should_process_notification_rejects_unrelated_type() {
+    let v = serde_json::json!({"type":"session-start"});
+    assert!(!should_process_notification(&v));
+}
+
+// ========================================
 // safe_name tests
 // ========================================
 

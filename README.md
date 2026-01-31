@@ -111,6 +111,14 @@ make obsidian-dirs
    - Claude Code: `~/.claude/settings.json`
    - Codex CLI: `~/.codex/config.toml`
 
+5. **（Codex CLI）プロジェクトの trust 設定を確認**
+   - Codex が「untrusted」扱いのディレクトリでは、バージョン/設定によって `notify` コマンドの実行が抑止されることがあります。
+   - その場合は `~/.codex/config.toml` に対象プロジェクトを追加して `trust_level = "trusted"` にしてください。
+
+6. **（Codex CLI / fnm）Node.js のバージョン差分を疑う**
+   - `npm i -g @openai/codex` の場合、`codex` は `#!/usr/bin/env node` で起動するため、ディレクトリごとに `fnm` が `node` を切り替える構成だと挙動が変わる可能性があります。
+   - `which codex` / `codex --version` / `node -v` を、ログが出るディレクトリと出ないディレクトリで比較してください。
+
 ## Makefile コマンド
 
 | コマンド | 説明 |

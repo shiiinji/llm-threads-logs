@@ -13,48 +13,56 @@ pub const BEGIN: &str = "<!-- BEGIN AUTO TURNS -->";
 pub const END: &str = "<!-- END AUTO TURNS -->";
 
 fn main() -> Result<()> {
-    let payload = env::args().nth(1);
-    let payload = match payload {
+    let payload_arg = env::args().nth(1);
+    let payload_arg = match payload_arg {
         Some(p) if !p.trim().is_empty() => p,
         _ => return Ok(()),
     };
 
-    let notification: Value =
-        serde_json::from_str(&payload).context("failed to parse notify JSON from argv[1]")?;
+    // Codex has historically passed the notification as a JSON string in argv[1],
+    // but support treating argv[1] as a file path (JSON) as well.
+    let mut raw_source = payload_arg.clone();
+    let notification: Value = match serde_json::from_str(&payload_arg) {
+        Ok(v) => v,
+        Err(e_json) => match fs::read_to_string(&payload_arg) {
+            Ok(file_text) => {
+                raw_source = file_text;
+                serde_json::from_str(&raw_source)
+                    .context("failed to parse notify JSON from file path in argv[1]")?
+            }
+            Err(e_file) => {
+                return Err(e_json).with_context(|| {
+                    format!(
+                        "failed to parse notify JSON from argv[1] and failed to read it as a file path: {}",
+                        e_file
+                    )
+                })
+            }
+        },
+    };
 
-    if notification.get("type").and_then(|v| v.as_str()) != Some("agent-turn-complete") {
+    if !should_process_notification(&notification) {
         return Ok(());
     }
 
-    let thread_id = notification
-        .get("thread-id")
-        .or_else(|| notification.get("thread_id"))
-        .and_then(|v| v.as_str())
+    let thread_id = notification_str(&notification, &["thread-id", "thread_id", "threadId"])
         .unwrap_or("unknown-thread");
     let thread_id_safe = safe_id(thread_id, "unknown-thread");
 
-    let turn_id = notification
-        .get("turn-id")
-        .or_else(|| notification.get("turn_id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let turn_id = notification_str(&notification, &["turn-id", "turn_id", "turnId"]).unwrap_or("");
 
-    let cwd = notification
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or(".");
+    let cwd = notification_str(&notification, &["cwd"]).unwrap_or(".");
 
     let input_messages = notification
         .get("input-messages")
         .or_else(|| notification.get("input_messages"))
+        .or_else(|| notification.get("inputMessages"))
         .cloned()
         .unwrap_or(Value::Null);
 
-    let last_assistant = notification
-        .get("last-assistant-message")
-        .or_else(|| notification.get("last_assistant_message"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let last_assistant =
+        notification_str(&notification, &["last-assistant-message", "last_assistant_message", "lastAssistantMessage"])
+            .unwrap_or("");
 
     let vault = env::var("OBSIDIAN_VAULT").context("Missing OBSIDIAN_VAULT env var")?;
     let ai_root = env::var("OBSIDIAN_AI_ROOT").context("Missing OBSIDIAN_AI_ROOT env var")?;
@@ -68,7 +76,7 @@ fn main() -> Result<()> {
     fs::create_dir_all(&md_dir).context("failed to create md_dir")?;
     fs::create_dir_all(&raw_dir).context("failed to create raw_dir")?;
 
-    let raw_line = serde_json::to_string(&notification).unwrap_or(payload);
+    let raw_line = serde_json::to_string(&notification).unwrap_or(raw_source);
 
     let lock_path = md_dir.join(format!(".lock_{thread_id_safe}"));
     with_lock_file(&lock_path, || {
@@ -110,6 +118,30 @@ fn main() -> Result<()> {
         Ok(())
     })?;
     Ok(())
+}
+
+pub fn should_process_notification(notification: &Value) -> bool {
+    let typ = notification.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if typ == "agent-turn-complete" {
+        return true;
+    }
+
+    // Be tolerant of schema changes across Codex CLI versions.
+    // Examples seen/expected: "agent-turn-complete", "assistant-turn-complete", "turn-complete".
+    if typ.ends_with("turn-complete") || typ.ends_with("turn_complete") {
+        return true;
+    }
+
+    false
+}
+
+fn notification_str<'a>(notification: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    for key in keys {
+        if let Some(s) = notification.get(*key).and_then(|v| v.as_str()) {
+            return Some(s);
+        }
+    }
+    None
 }
 
 pub fn build_codex_note_skeleton(project: &str, thread_id: &str, cwd: &str) -> String {
