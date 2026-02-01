@@ -80,11 +80,11 @@ make obsidian-dirs
 
 ### Claude Code
 
-各ターン完了時（Claude の応答終了時）に `$OBSIDIAN_VAULT/$OBSIDIAN_AI_ROOT/Claude Code/<project>/Threads/` にMarkdownが生成・更新される。
+各ターン完了時（Claude の応答終了時）に `$OBSIDIAN_VAULT/$OBSIDIAN_AI_ROOT/Claude Code/<project>/Threads/YYYY/mm/DD/` にMarkdownが生成・更新される。
 
 ### Codex CLI
 
-エージェントのターン完了時に `$OBSIDIAN_VAULT/$OBSIDIAN_AI_ROOT/Codex/<project>/Threads/` にMarkdownが追記される。
+エージェントのターン完了時に `$OBSIDIAN_VAULT/$OBSIDIAN_AI_ROOT/Codex/<project>/Threads/YYYY/mm/DD/` にMarkdownが追記される。
 
 ## トラブルシューティング
 

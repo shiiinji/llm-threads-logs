@@ -3,7 +3,7 @@ use std::{
     fs,
     fs::OpenOptions,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     thread,
     time::{Duration, Instant, SystemTime},
@@ -238,3 +238,49 @@ fn is_stale_lock(lock_path: &Path, stale_after: Duration) -> bool {
         > stale_after
 }
 
+pub fn find_md_file_containing_id(root: &Path, id: &str) -> Option<PathBuf> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    if !root.exists() {
+        return None;
+    }
+
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+            let name = match file_name.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
+
+            if name.ends_with(".md") && name.contains(id) {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}

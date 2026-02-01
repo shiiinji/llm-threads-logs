@@ -1,4 +1,7 @@
-use ai_log_exporter::{generate_title, git_project_name, safe_id, safe_name, with_lock_file, yaml_quote};
+use ai_log_exporter::{
+    find_md_file_containing_id, generate_title, git_project_name, safe_id, safe_name, with_lock_file,
+    yaml_quote,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, SecondsFormat};
 use serde_json::Value;
@@ -54,20 +57,17 @@ fn main() -> Result<()> {
     let vault_path = PathBuf::from(&vault);
     let base_dir = vault_path.join(&ai_root).join("Claude Code").join(&project);
     let md_dir = base_dir.join("Threads");
-    let raw_dir = base_dir.join("_raw");
     fs::create_dir_all(&md_dir).context("failed to create md_dir")?;
-    fs::create_dir_all(&raw_dir).context("failed to create raw_dir")?;
 
     let lock_path = md_dir.join(format!(".lock_{session_id_safe}"));
     with_lock_file(&lock_path, || {
-        let raw_copy = raw_dir.join(format!("{session_id_safe}.jsonl"));
-        let _ = fs::copy(transcript_path, &raw_copy);
-
         let msgs = parse_claude_jsonl(transcript_path).context("failed to parse transcript JSONL")?;
         let started_at = msgs.iter().find_map(|m| m.ts);
         let first_user_msg = msgs.iter().find(|m| m.role == "user").map(|m| m.text.as_str());
 
-        let md_path = find_or_create_md_path(&md_dir, &session_id_safe, first_user_msg, started_at);
+        let md_path =
+            find_or_create_md_path(&md_dir, &session_id_safe, first_user_msg, started_at)
+                .context("failed to find or create md path")?;
 
         let existing = if md_path.exists() {
             fs::read_to_string(&md_path).context("failed to read existing md note")?
@@ -76,11 +76,7 @@ fn main() -> Result<()> {
         };
 
         let exported = Local::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        let source_rel = raw_copy
-            .strip_prefix(&vault_path)
-            .ok()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| raw_copy.display().to_string());
+        let source_rel = transcript_path.to_string();
 
         let new_block = build_transcript_block(&exported, &source_rel, &msgs);
         let updated = upsert_block(&existing, &new_block);
@@ -247,25 +243,72 @@ fn find_or_create_md_path(
     session_id: &str,
     first_user_msg: Option<&str>,
     started_at: Option<DateTime<Local>>,
-) -> PathBuf {
-    if let Ok(entries) = fs::read_dir(md_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if let Some(name_str) = name.to_str() {
-                if name_str.contains(session_id) && name_str.ends_with(".md") {
-                    return entry.path();
-                }
-            }
+) -> Result<PathBuf> {
+    if let Some(existing) = find_md_file_containing_id(md_dir, session_id) {
+        if let Some(migrated) = maybe_migrate_legacy_md_path(md_dir, &existing) {
+            return Ok(migrated);
         }
+        return Ok(existing);
     }
 
-    let date = started_at
-        .unwrap_or_else(Local::now)
-        .format("%Y-%m-%d")
-        .to_string();
+    let started_at = started_at.unwrap_or_else(Local::now);
+    let day_dir = md_dir
+        .join(started_at.format("%Y").to_string())
+        .join(started_at.format("%m").to_string())
+        .join(started_at.format("%d").to_string());
+    fs::create_dir_all(&day_dir).context("failed to create dated Threads dir")?;
+
     let title = generate_title(first_user_msg);
-    let filename = format!("{date}_{title}_{session_id}.md");
-    md_dir.join(filename)
+    let filename = format!("{title}_{session_id}.md");
+    Ok(day_dir.join(filename))
+}
+
+fn maybe_migrate_legacy_md_path(md_dir: &Path, existing: &Path) -> Option<PathBuf> {
+    if existing.parent()? != md_dir {
+        return None;
+    }
+
+    let name = existing.file_name()?.to_str()?;
+    let (yyyy, mm, dd, rest) = split_legacy_dated_filename(name)?;
+
+    let target_dir = md_dir.join(yyyy).join(mm).join(dd);
+    let target_path = target_dir.join(rest);
+
+    if target_path.exists() {
+        return None;
+    }
+
+    fs::create_dir_all(&target_dir).ok()?;
+    fs::rename(existing, &target_path).ok()?;
+    Some(target_path)
+}
+
+fn split_legacy_dated_filename(name: &str) -> Option<(&str, &str, &str, &str)> {
+    // legacy: YYYY-MM-DD_<title>_<id>.md
+    if !name.ends_with(".md") || name.len() < 12 {
+        return None;
+    }
+
+    let bytes = name.as_bytes();
+    if bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') || bytes.get(10) != Some(&b'_') {
+        return None;
+    }
+    if !bytes.get(0..4)?.iter().all(|b| b.is_ascii_digit())
+        || !bytes.get(5..7)?.iter().all(|b| b.is_ascii_digit())
+        || !bytes.get(8..10)?.iter().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let yyyy = name.get(0..4)?;
+    let mm = name.get(5..7)?;
+    let dd = name.get(8..10)?;
+    let rest = name.get(11..)?;
+    if rest.is_empty() {
+        return None;
+    }
+
+    Some((yyyy, mm, dd, rest))
 }
 
 #[cfg(test)]

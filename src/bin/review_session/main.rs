@@ -1,4 +1,4 @@
-use ai_log_exporter::{git_project_name, safe_id, safe_name, with_lock_file};
+use ai_log_exporter::{find_md_file_containing_id, git_project_name, safe_id, safe_name, with_lock_file};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
@@ -106,20 +106,7 @@ reviewed_file: "{}"
 }
 
 fn find_md_by_session_id(md_dir: &PathBuf, session_id: &str) -> Option<PathBuf> {
-    if !md_dir.exists() {
-        return None;
-    }
-
-    let entries = fs::read_dir(md_dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if let Some(name_str) = name.to_str() {
-            if name_str.contains(session_id) && name_str.ends_with(".md") {
-                return Some(entry.path());
-            }
-        }
-    }
-    None
+    find_md_file_containing_id(md_dir, session_id)
 }
 
 pub fn extract_user_messages(md_content: &str) -> Vec<String> {
